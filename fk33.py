@@ -20,6 +20,7 @@ from litex.soc.cores.led import LedChaser
 from litex.soc.interconnect import wishbone, axi
 
 from hbm_ip import HBMIP
+import wb2axi
 
 # IOs ----------------------------------------------------------------------------------------------
 
@@ -124,14 +125,44 @@ class BaseSoC(SoCCore):
             self.bus.add_slave("main_ram", wb_cpu)
 
             # Convertion: cpu.wishbone(32) <-> ... <-> hbm.axi(256)
-            wb_hbm = wishbone.Interface(data_width=axi_hbm.data_width)
-            #  self.submodules.wb_converter = wishbone.Converter(wb_cpu, wb_hbm)
-            #  self.submodules.wb_converter = UpConverter(wb_cpu, wb_hbm)
-            self.add_l2_cache(wb_cpu, wb_hbm)
+            if False:
+                print("=" * 80)
+                print("  Using Wishbone2AXILite with L2 cache")
+                print("=" * 80)
+                wb_hbm = wishbone.Interface(data_width=axi_hbm.data_width)
+                #  self.submodules.wb_converter = wishbone.Converter(wb_cpu, wb_hbm)
+                #  self.submodules.wb_converter = UpConverter(wb_cpu, wb_hbm)
+                self.add_l2_cache(wb_cpu, wb_hbm)
 
-            wb_wider = wishbone.Interface(data_width=wb_cache.data_width, adr_width=37 - 5)
-            self.submodules.wb2axi = axi.Wishbone2AXILite(
-                wb_wider, axi_hbm, base_address=self.bus.regions["main_ram"].origin)
+                wb_wider = wishbone.Interface(data_width=wb_cache.data_width, adr_width=37 - 5)
+                self.submodules.wb2axi = axi.Wishbone2AXILite(
+                    wb_wider, axi_hbm, base_address=self.bus.regions["main_ram"].origin)
+
+            else:
+                print("=" * 80)
+                print("  Using wb->wbp->axi")
+                print("=" * 80)
+                # wb_cpu -> (l2 cache) -> wb_hbm -> (wbc2pipe) -> wb_pipe -> (wb2axi) -> axi_hbm
+
+                # Add L2 Cache as we have to use 256-bit wishbone so that AxSIZE is 0b101 (256-bit)
+                # as it is the only one supported by the IP core
+                # Also, fixed address bursts are not supported (AxBURST=0b00)
+                wb_hbm = wishbone.Interface(data_width=axi_hbm.data_width)
+                self.add_l2_cache(wb_cpu, wb_hbm)
+
+                wb_pipe = wb2axi.WishbonePipelined(data_width=256, adr_width=32)
+                self.submodules.wbc2wbp = wb2axi.WishboneClassic2Pipeline(wb_hbm, wb_pipe)
+                self.wbc2wbp.add_sources(platform)
+
+                #  # AXI with address_width expected by wb2axi
+                #  conv_axi = axi.AXIInterface(data_width=axi_hbm.data_width, address_width=32,
+                #                          id_width=axi_hbm.id_width)
+                #  for channel in ["aw", "w", "b", "ar", "r"]:
+                #      self.comb += getattr(conv_axi, channel).connect(getattr(axi_hbm, channel))
+
+                self.submodules.wb2axi = wb2axi.WishbonePipelined2AXI(
+                    wb_pipe, axi_hbm, base_address=self.bus.regions["main_ram"].origin)
+                self.wb2axi.add_sources(platform)
 
     def add_l2_cache(self, wb_master, wb_slave,
                     l2_cache_size           = 8192,
