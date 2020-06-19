@@ -5,6 +5,7 @@
 
 import os
 import argparse
+from math import log2
 
 from migen import *
 
@@ -14,7 +15,11 @@ from litex.build.xilinx import XilinxPlatform, VivadoProgrammer
 from litex.soc.cores.clock import *
 from litex.soc.integration.soc_core import *
 from litex.soc.integration.builder import *
+from litex.soc.integration.soc import SoCRegion
 from litex.soc.cores.led import LedChaser
+from litex.soc.interconnect import wishbone, axi
+
+from hbm_ip import HBMIP
 
 # IOs ----------------------------------------------------------------------------------------------
 
@@ -72,18 +77,23 @@ class Platform(XilinxPlatform):
 
 class _CRG(Module):
     def __init__(self, platform, sys_clk_freq):
-        self.clock_domains.cd_sys    = ClockDomain()
+        self.clock_domains.cd_sys     = ClockDomain()
+        self.clock_domains.cd_hbm_ref = ClockDomain()
+        self.clock_domains.cd_apb     = ClockDomain()
 
         # # #
 
         self.submodules.pll = pll = USMMCM(speedgrade=-2)
         pll.register_clkin(platform.request("clk200"), 200e6)
         pll.create_clkout(self.cd_sys, sys_clk_freq)
+        pll.create_clkout(self.cd_hbm_ref, 100e6)
+        pll.create_clkout(self.cd_apb, 100e6)
+        assert 225e6 <= sys_clk_freq <= 450e6
 
 # BaseSoC ------------------------------------------------------------------------------------------
 
 class BaseSoC(SoCCore):
-    def __init__(self, sys_clk_freq=int(125e6), **kwargs):
+    def __init__(self, sys_clk_freq=int(450e6), with_hbm=False, **kwargs):
         platform = Platform()
 
         # SoCCore ----------------------------------------------------------------------------------
@@ -98,17 +108,65 @@ class BaseSoC(SoCCore):
             sys_clk_freq = sys_clk_freq)
         self.add_csr("leds")
 
+        # HBM --------------------------------------------------------------------------------------
+        if with_hbm:
+            hbm = HBMIP(platform)
+            self.submodules.hbm = ClockDomainsRenamer({"axi": "sys"})(hbm)
+            self.add_csr("hbm")
+            axi_hbm = hbm.axi[0]
+
+            # Add main_ram wishbone
+            wb_cpu = wishbone.Interface()
+            self.bus.add_region("main_ram", SoCRegion(
+                origin=self.mem_map["main_ram"],
+                size=kwargs.get("max_sdram_size", 0x40000000)  # 1GB; could be 8GB with wider address
+            ))
+            self.bus.add_slave("main_ram", wb_cpu)
+
+            # Convertion: cpu.wishbone(32) <-> ... <-> hbm.axi(256)
+            wb_hbm = wishbone.Interface(data_width=axi_hbm.data_width)
+            #  self.submodules.wb_converter = wishbone.Converter(wb_cpu, wb_hbm)
+            #  self.submodules.wb_converter = UpConverter(wb_cpu, wb_hbm)
+            self.add_l2_cache(wb_cpu, wb_hbm)
+
+            wb_wider = wishbone.Interface(data_width=wb_cache.data_width, adr_width=37 - 5)
+            self.submodules.wb2axi = axi.Wishbone2AXILite(
+                wb_wider, axi_hbm, base_address=self.bus.regions["main_ram"].origin)
+
+    def add_l2_cache(self, wb_master, wb_slave,
+                    l2_cache_size           = 8192,
+                    l2_cache_min_data_width = 128,
+                    l2_cache_reverse        = True,
+                    l2_cache_full_memory_we = True):
+
+        assert wb_slave.data_width >= l2_cache_min_data_width
+
+        l2_cache_size = max(l2_cache_size, int(2*wb_slave.data_width/8)) # Use minimal size if lower
+        l2_cache_size = 2**int(log2(l2_cache_size))                  # Round to nearest power of 2
+        l2_cache            = wishbone.Cache(
+            cachesize = l2_cache_size//4,
+            master    = wb_master,
+            slave     = wb_slave,
+            reverse   = l2_cache_reverse)
+
+        if l2_cache_full_memory_we:
+            l2_cache = FullMemoryWE()(l2_cache)
+
+        self.submodules.l2_cache = l2_cache
+        self.add_config("L2_SIZE", l2_cache_size)
+
 # Build --------------------------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(description="LiteX SoC on Forest Kitten 33")
     parser.add_argument("--build", action="store_true", help="Build bitstream")
     parser.add_argument("--load",  action="store_true", help="Load bitstream")
+    parser.add_argument("--with-hbm",  action="store_true", help="Use HBM")
     builder_args(parser)
     soc_core_args(parser)
     args = parser.parse_args()
 
-    soc = BaseSoC(**soc_core_argdict(args))
+    soc = BaseSoC(with_hbm=args.with_hbm, **soc_core_argdict(args))
     builder = Builder(soc, **builder_argdict(args))
     builder.build(run=args.build)
 
