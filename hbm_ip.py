@@ -23,7 +23,7 @@ class HBMIP(Module, AutoCSR):
 
         self.hbm_params = params = {}
 
-        self.init_done = CSRStatus()
+        rst = Signal(reset=1)
 
         # Clocks -----------------------------------------------------------------------------------
         # ref = 100 MHz (HBM: 900 (225-900) MHz)
@@ -34,12 +34,12 @@ class HBMIP(Module, AutoCSR):
         # APB: 100 (50-100) MHz
         for i in range(2):
             params[f"i_APB_{i:1d}_PCLK"] = ClockSignal("apb")
-            params[f"i_APB_{i:1d}_PRESET_N"] = ResetSignal("apb")
+            params[f"i_APB_{i:1d}_PRESET_N"] = ~(ResetSignal("apb") | rst)
 
         # AXI: 450 (225-450) MHz
         for i in range(32):
             params[f"i_AXI_{i:02d}_ACLK"] = ClockSignal("axi")
-            params[f"i_AXI_{i:02d}_ARESET_N"] = ResetSignal("axi")
+            params[f"i_AXI_{i:02d}_ARESET_N"] = ~(ResetSignal("apb") | rst)
 
         # AXI --------------------------------------------------------------------------------------
         for i in range(32):
@@ -109,22 +109,47 @@ class HBMIP(Module, AutoCSR):
         # Temperature ------------------------------------------------------------------------------
         for i in range(2):
             params[f"o_DRAM_{i:1d}_STAT_CATTRIP"] = stat_cattrip = Signal()
-            params[f"o_DRAM_{i:1d}_STAT_TEMP"]    = stat_temp    = Signal()
+            params[f"o_DRAM_{i:1d}_STAT_TEMP"]    = stat_temp    = Signal(7)
             self.dram_stat_cattrip.append(stat_cattrip)
             self.dram_stat_temp.append(stat_temp)
 
+        # CSRs -------------------------------------------------------------------------------------
+        self.init_done = CSRStatus()
         self.comb += self.init_done.status.eq(self.apb_complete[0] & self.apb_complete[1])
+        self.apb_done = CSRStatus(2)
+        self.comb += self.apb_done.status.eq(Cat(self.apb_complete[0], self.apb_complete[1]))
+
+        self.clk_resets = CSRStatus(fields=[
+            CSRField("apb", 1),
+            CSRField("axi", 1),
+        ])
+        self.comb += self.clk_resets.fields.apb.eq(~ResetSignal("apb"))
+        self.comb += self.clk_resets.fields.axi.eq(~ResetSignal("axi"))
+
+        self.csr_cattrip_0 = CSRStatus(1, name="dram_stat_cattrip_0")
+        self.csr_cattrip_1 = CSRStatus(1, name="dram_stat_cattrip_1")
+        self.csr_temp_0 = CSRStatus(7, name="dram_stat_temp_0")
+        self.csr_temp_1 = CSRStatus(7, name="dram_stat_temp_1")
+        self.comb += [
+            self.csr_cattrip_0.status.eq(self.dram_stat_cattrip[0]),
+            self.csr_cattrip_1.status.eq(self.dram_stat_cattrip[1]),
+            self.csr_temp_0.status.eq(self.dram_stat_temp[0]),
+            self.csr_temp_1.status.eq(self.dram_stat_temp[1]),
+        ]
+
+        self.rst_toggle = CSR()
+        self.sync += If(self.rst_toggle.re, rst.eq(~rst))
 
     def add_sources(self, platform):
         this_dir = os.path.dirname(os.path.abspath(os.path.realpath(__file__)))
         platform.add_ip(os.path.join(this_dir, "ip", "hbm", self.hbm_name + ".xci"))
         # FIXME: in Vivado 2018 it is not possible to disable XSDB so we need a debug core?
-        platform.add_ip(os.path.join(this_dir, "ip", "ila", "ila_0.xci"))
+        #  platform.add_ip(os.path.join(this_dir, "ip", "ila", "ila_0.xci"))
 
     def do_finalize(self):
         self.add_sources(self.platform)
         self.specials += Instance(self.hbm_name, **self.hbm_params)
-        self.specials += Instance("ila_0",  # FIXME: remove
-                                  i_clk=ClockSignal("apb"),
-                                  i_probe0=self.axi[0].ar.valid,
-                                  )
+        #  self.specials += Instance("ila_0",  # FIXME: remove
+        #                            i_clk=ClockSignal("apb"),
+        #                            i_probe0=self.axi[0].ar.valid,
+        #                            )
