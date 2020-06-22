@@ -8,6 +8,28 @@ from litex.soc.integration.builder import *
 from litex.soc.interconnect.axi import *
 
 
+class BusCSRDebug(Module, AutoCSR):
+    def __init__(self, description, trigger, reset=None):
+        if reset is None:
+            self.reset = CSR()
+            reset = self.reset.re
+        self.count = CSRStatus(32)
+
+        updates = []
+        for name, signal in description.items():
+            csr = CSRStatus(len(signal), name=name)
+            setattr(self, name, csr)
+            updates.append(csr.status.eq(signal))
+
+        self.sync += [
+            If(reset, self.count.status.eq(0)),
+            If(trigger,
+                self.count.status.eq(self.count.status + 1),
+               *updates,
+            ),
+        ]
+
+
 class HBMIP(Module, AutoCSR):
     """Xilinx Virtex US+ High Bandwidth Memory IP wrapper"""
     def __init__(self, platform, hbm_ip_name="hbm_0"):
@@ -23,7 +45,7 @@ class HBMIP(Module, AutoCSR):
 
         self.hbm_params = params = {}
 
-        rst = Signal(reset=1)
+        rst = Signal(reset=0)
 
         # Clocks -----------------------------------------------------------------------------------
         # ref = 100 MHz (HBM: 900 (225-900) MHz)
@@ -139,6 +161,63 @@ class HBMIP(Module, AutoCSR):
 
         self.rst_toggle = CSR()
         self.sync += If(self.rst_toggle.re, rst.eq(~rst))
+
+        # axi debuggig
+        axi = self.axi[0]
+        self.axi_debug_reset = CSR()
+
+        self.submodules.axi_aw_debug = BusCSRDebug(
+            description = {
+                "addr": axi.aw.addr,
+                "burst": axi.aw.burst,
+                "len": axi.aw.len,
+                "size": axi.aw.size,
+                "id": axi.aw.id,
+            },
+            trigger = axi.aw.valid & axi.aw.ready,
+            reset = self.axi_debug_reset.re,
+        )
+
+        self.submodules.axi_w_debug = BusCSRDebug(
+            description = {
+                "data": axi.w.data,
+                "strb": axi.w.strb,
+                "id": axi.w.id,
+            },
+            trigger = axi.w.valid & axi.w.ready,
+            reset = self.axi_debug_reset.re,
+        )
+
+        self.submodules.axi_b_debug = BusCSRDebug(
+            description = {
+                "resp": axi.b.resp,
+                "id": axi.b.id,
+            },
+            trigger = axi.b.valid & axi.b.ready,
+            reset = self.axi_debug_reset.re,
+        )
+
+        self.submodules.axi_ar_debug = BusCSRDebug(
+            description = {
+                "addr": axi.ar.addr,
+                "burst": axi.ar.burst,
+                "len": axi.ar.len,
+                "size": axi.ar.size,
+                "id": axi.ar.id,
+            },
+            trigger = axi.ar.valid & axi.ar.ready,
+            reset = self.axi_debug_reset.re,
+        )
+
+        self.submodules.axi_r_debug = BusCSRDebug(
+            description = {
+                "resp": axi.r.resp,
+                "data": axi.r.data,
+                "id": axi.r.id,
+            },
+            trigger = axi.r.valid & axi.r.ready,
+            reset = self.axi_debug_reset.re,
+        )
 
     def add_sources(self, platform):
         this_dir = os.path.dirname(os.path.abspath(os.path.realpath(__file__)))
