@@ -202,10 +202,10 @@ class BaseSoC(SoCCore):
                 else:
                     print("  Using %d bits of data path" % wb_cpu.data_width)
                     print("=" * 80)
-                    self.comb += wb_hbm.connect(wb_cpu)
+                    self.comb += wb_cpu.connect(wb_hbm)
 
                 wb_wider = wishbone.Interface(data_width=wb_hbm.data_width, adr_width=37 - 5)
-                self.comb += wb_wider.connect(wb_hbm)
+                self.comb += wb_hbm.connect(wb_wider)
 
                 axi_lite_hbm = axi.AXILiteInterface(data_width=axi_hbm.data_width, address_width=axi_hbm.address_width)
                 self.submodules.wb2axi = axi.Wishbone2AXILite(
