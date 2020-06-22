@@ -19,7 +19,7 @@ from litex.soc.integration.soc import SoCRegion
 from litex.soc.cores.led import LedChaser
 from litex.soc.interconnect import wishbone, axi
 
-from hbm_ip import HBMIP
+from hbm_ip import HBMIP, BusCSRDebug
 import wb2axi
 
 # IOs ----------------------------------------------------------------------------------------------
@@ -94,7 +94,7 @@ class _CRG(Module):
 # BaseSoC ------------------------------------------------------------------------------------------
 
 class BaseSoC(SoCCore):
-    def __init__(self, sys_clk_freq=int(450e6), with_hbm=False, **kwargs):
+    def __init__(self, sys_clk_freq=int(450e6), with_hbm=False, with_full_wb2axi=False, **kwargs):
         platform = Platform()
 
         # SoCCore ----------------------------------------------------------------------------------
@@ -125,19 +125,43 @@ class BaseSoC(SoCCore):
             self.bus.add_slave("main_ram", wb_cpu)
 
             # Convertion: cpu.wishbone(32) <-> ... <-> hbm.axi(256)
-            if False:
+            if not with_full_wb2axi:
                 print("=" * 80)
-                print("  Using Wishbone2AXILite with L2 cache")
+                print("  Using Wishbone2AXILite")
                 print("=" * 80)
+                # wb_cpu -> (l2 cache) -> wb_hbm -> wb_wider -> (wb2axilite) -> axi_lite_hbm -> axi_hbm
                 wb_hbm = wishbone.Interface(data_width=axi_hbm.data_width)
-                #  self.submodules.wb_converter = wishbone.Converter(wb_cpu, wb_hbm)
-                #  self.submodules.wb_converter = UpConverter(wb_cpu, wb_hbm)
-                self.add_l2_cache(wb_cpu, wb_hbm)
 
-                wb_wider = wishbone.Interface(data_width=wb_cache.data_width, adr_width=37 - 5)
+                l2_size = kwargs.get("l2_size", 8192)
+                if l2_size != 0:
+                    print("  Adding L2 cache of size = %d" % l2_size)
+                    print("=" * 80)
+                    self.add_l2_cache(wb_cpu, wb_hbm,
+                                      l2_cache_size           = l2_size,
+                                      l2_cache_min_data_width = kwargs.get("min_l2_data_width", 128),
+                                      )
+                else:
+                    print("  Using %d bits of data path" % wb_cpu.data_width)
+                    print("=" * 80)
+                    self.comb += wb_hbm.connect(wb_cpu)
+
+                wb_wider = wishbone.Interface(data_width=wb_hbm.data_width, adr_width=37 - 5)
+                self.comb += wb_wider.connect(wb_hbm)
                 self.submodules.wb2axi = axi.Wishbone2AXILite(
                     wb_wider, axi_hbm, base_address=self.bus.regions["main_ram"].origin)
 
+                self.submodules.wb_cpu_debug = BusCSRDebug(
+                    description = {
+                        "adr": wb_cpu.adr,
+                        "dat_w": wb_cpu.dat_w,
+                        "dat_r": wb_cpu.dat_r,
+                        "sel": wb_cpu.sel,
+                        "we": wb_cpu.we,
+                        "err": wb_cpu.err,
+                    },
+                    trigger = wb_cpu.stb & wb_cpu.cyc & (wb_cpu.ack | wb_cpu.err),
+                )
+                self.add_csr("wb_cpu_debug")
             else:
                 print("=" * 80)
                 print("  Using wb->wbp->axi")
@@ -190,14 +214,19 @@ class BaseSoC(SoCCore):
 
 def main():
     parser = argparse.ArgumentParser(description="LiteX SoC on Forest Kitten 33")
-    parser.add_argument("--build", action="store_true", help="Build bitstream")
-    parser.add_argument("--load",  action="store_true", help="Load bitstream")
-    parser.add_argument("--with-hbm",  action="store_true", help="Use HBM")
+    parser.add_argument("--build",    action="store_true", help="Build bitstream")
+    parser.add_argument("--load",     action="store_true", help="Load bitstream")
+    parser.add_argument("--with-hbm", action="store_true", help="Use HBM")
+    parser.add_argument("--with-full-wb2axi", action="store_true", help="Use full Wishbone2AXI")
+    parser.add_argument("--l2-size",  type=int,            help="Set HBM L2 cache size")
     builder_args(parser)
     soc_core_args(parser)
     args = parser.parse_args()
 
-    soc = BaseSoC(with_hbm=args.with_hbm, **soc_core_argdict(args))
+    kwargs = soc_core_argdict(args)
+    if args.l2_size is not None:
+        kwargs["l2_size"] = args.l2_size
+    soc = BaseSoC(with_hbm=args.with_hbm, with_full_wb2axi=args.with_full_wb2axi, **kwargs)
     builder = Builder(soc, **builder_argdict(args))
     builder.build(run=args.build)
 
