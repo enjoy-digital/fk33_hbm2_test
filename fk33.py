@@ -81,6 +81,55 @@ class AXILite2AXI(Module):
             axi.r.ready.eq(axi_lite.r.ready),
         ]
 
+class WishboneSoftControl(Module, AutoCSR):
+    def __init__(self, wb):
+        self.wb = wb
+        self.write = CSR()
+        self.read = CSR()
+        self.data = CSRStorage(wb.data_width)
+        self.adr = CSRStorage(wb.adr_width)
+        adr = Signal(wb.adr_width)
+        data = Signal(wb.data_width)
+
+        self.submodules.fsm = FSM()
+        self.fsm.act("IDLE",
+            If(self.write.re,
+                NextValue(adr, self.adr.storage),
+                NextValue(data, self.data.storage),
+                NextState("WRITE")
+            ),
+            If(self.read.re,
+                NextValue(adr, self.adr.storage),
+                NextState("READ")
+            ),
+        )
+        self.fsm.act("WRITE",
+            wb.adr.eq(adr),
+            wb.dat_w.eq(data),
+            wb.sel.eq(2**len(wb.sel) - 1),
+            wb.we.eq(1),
+            wb.cyc.eq(1),
+            wb.stb.eq(1),
+            If(wb.ack,
+               NextState("IDLE")
+            ),
+        )
+        self.fsm.act("READ",
+            wb.adr.eq(adr),
+            wb.sel.eq(2**len(wb.sel) - 1),
+            wb.we.eq(0),
+            wb.cyc.eq(1),
+            wb.stb.eq(1),
+            If(wb.ack,
+               If(wb.err,
+                   NextValue(data, 0xbaadc0de),
+               ).Else(
+                   NextValue(self.data.storage, wb.dat_r),
+               ),
+               NextState("IDLE")
+            ),
+        )
+
 # IOs ----------------------------------------------------------------------------------------------
 
 _io = [
@@ -183,6 +232,25 @@ class BaseSoC(SoCCore):
             ))
             self.bus.add_slave("main_ram", wb_cpu)
 
+            class WishboneSoftInjector(Module, AutoCSR):
+                def __init__(self, wb_cpu, wb_csr):
+                    self.wb_slave = wishbone.Interface.like(wb_cpu)
+                    self.soft_control = CSRStorage()
+                    self.comb += [
+                        If(self.soft_control.storage,
+                           wb_csr.connect(self.wb_slave)
+                        ).Else(
+                           wb_cpu.connect(self.wb_slave)
+                        )
+                    ]
+
+            wb_soft = wishbone.Interface.like(wb_cpu)
+            self.submodules.wb_softcontrol = WishboneSoftControl(wb_soft)
+            self.add_csr("wb_softcontrol")
+            self.submodules.wb_injector = WishboneSoftInjector(wb_cpu, wb_soft)
+            self.add_csr("wb_injector")
+            wb_cpu = self.wb_injector.wb_slave
+
             # Convertion: cpu.wishbone(32) <-> ... <-> hbm.axi(256)
             if not with_full_wb2axi:
                 print("=" * 80)
@@ -209,7 +277,8 @@ class BaseSoC(SoCCore):
 
                 axi_lite_hbm = axi.AXILiteInterface(data_width=axi_hbm.data_width, address_width=axi_hbm.address_width)
                 self.submodules.wb2axi = axi.Wishbone2AXILite(
-                    wb_wider, axi_lite_hbm, base_address=self.bus.regions["main_ram"].origin)
+                    wb_wider, axi_lite_hbm,
+                    base_address=self.mem_map["main_ram"])
 
                 # fixed burst not supported by AXI HBM IP
                 self.submodules.axil2axi = AXILite2AXI(axi_lite_hbm, axi_hbm, burst_type="INCR")
