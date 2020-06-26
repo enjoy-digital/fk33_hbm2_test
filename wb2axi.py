@@ -93,7 +93,7 @@ class WishbonePipelined2AXI(Module):
             (axi.data_width, wb.data_width)
 
         wb_adr = Signal.like(wb.adr)
-        self.comb += wb_adr.eq(wb.adr - base_address)
+        self.comb += wb_adr.eq(wb.adr - base_address//4)
 
         self.specials += Instance("wbm2axisp",
             # Parameters

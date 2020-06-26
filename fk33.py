@@ -202,7 +202,7 @@ class _CRG(Module):
 # BaseSoC ------------------------------------------------------------------------------------------
 
 class BaseSoC(SoCCore):
-    def __init__(self, sys_clk_freq=int(450e6), with_hbm=False, with_full_wb2axi=False, debug=True,
+    def __init__(self, sys_clk_freq=int(450e6), with_hbm=False, with_full_wb2axi=False, debug=False,
                  **kwargs):
         platform = Platform()
 
@@ -255,19 +255,23 @@ class BaseSoC(SoCCore):
             wb_hbm = wishbone.Interface(data_width=axi_hbm.data_width)
             l2_size = kwargs.get("l2_size", 8192)
             if l2_size != 0:
+                print("=" * 80)
                 print("  Adding L2 cache of size = %d" % l2_size)
                 print("=" * 80)
                 self.add_l2_cache(wb_cpu, wb_hbm,
                                   l2_cache_size           = l2_size,
                                   l2_cache_min_data_width = kwargs.get("min_l2_data_width", 128),
                                   )
+
             else:
                 print("  Using %d bits of data path" % wb_cpu.data_width)
                 print("=" * 80)
                 self.comb += wb_cpu.connect(wb_hbm)
 
+            # if L2 cache is present, it will shift the address, so we need to use a shifted origin
+            origin = self.mem_map["main_ram"] // (wb_hbm.data_width // wb_cpu.data_width)
+
             if not with_full_wb2axi:
-                print("=" * 80)
                 print("  Using Wishbone2AXILite")
                 print("=" * 80)
                 # wb_cpu -> (l2 cache) -> wb_hbm -> wb_wider -> (wb2axilite) -> axi_lite_hbm -> axi_hbm
@@ -278,12 +282,11 @@ class BaseSoC(SoCCore):
                 axi_lite_hbm = axi.AXILiteInterface(data_width=axi_hbm.data_width, address_width=axi_hbm.address_width)
                 self.submodules.wb2axi = axi.Wishbone2AXILite(
                     wb_wider, axi_lite_hbm,
-                    base_address=self.mem_map["main_ram"])
+                    base_address=origin)
 
                 # fixed burst not supported by AXI HBM IP
                 self.submodules.axil2axi = AXILite2AXI(axi_lite_hbm, axi_hbm, burst_type="INCR")
             else:
-                print("=" * 80)
                 print("  Using wb->wbp->axi")
                 print("=" * 80)
                 # wb_cpu -> (l2 cache) -> wb_hbm -> (wbc2pipe) -> wb_pipe -> (wb2axi) -> axi_hbm
@@ -299,11 +302,13 @@ class BaseSoC(SoCCore):
                 self.wbc2wbp.add_sources(platform)
 
                 self.submodules.wb2axi = wb2axi.WishbonePipelined2AXI(
-                    wb_pipe, axi_hbm, base_address=self.bus.regions["main_ram"].origin)
+                    wb_pipe, axi_hbm, base_address=origin)
                 self.wb2axi.add_sources(platform)
 
             if debug:
-                self.add_bus_debug_csrs(wb_cpu, axi_hbm)
+                print("  Adding debug CSRs")
+                print("=" * 80)
+                self.add_bus_debug_csrs(wb_cpu, wb_hbm, axi_hbm)
 
     def add_l2_cache(self, wb_master, wb_slave,
                     l2_cache_size           = 8192,
@@ -327,29 +332,41 @@ class BaseSoC(SoCCore):
         self.submodules.l2_cache = l2_cache
         self.add_config("L2_SIZE", l2_cache_size)
 
-    def add_bus_debug_csrs(self, wb, axi):
+    def add_bus_debug_csrs(self, wb_cpu, wb_hbm, axi):
         class Debug(Module, AutoCSR):
-            def __init__(self, wb, axi):
+            def __init__(self):
                 self.reset = CSR()
-                self.submodules.wb = BusCSRDebug(
+                self.submodules.wb_cpu = BusCSRDebug(
                     description = {
-                        "adr": wb.adr,
-                        "dat_w": wb.dat_w,
-                        "dat_r": wb.dat_r,
-                        "sel": wb.sel,
-                        "we": wb.we,
-                        "err": wb.err,
+                        "adr": wb_cpu.adr,
+                        "dat_w": wb_cpu.dat_w,
+                        "dat_r": wb_cpu.dat_r,
+                        "sel": wb_cpu.sel,
+                        "we": wb_cpu.we,
+                        "err": wb_cpu.err,
                     },
-                    trigger = wb.stb & wb.cyc & (wb.ack | wb.err),
+                    trigger = wb_cpu.stb & wb_cpu.cyc & (wb_cpu.ack | wb_cpu.err),
+                    reset = self.reset.re,
+                )
+                self.submodules.wb_hbm = BusCSRDebug(
+                    description = {
+                        "adr": wb_hbm.adr,
+                        "dat_w": wb_hbm.dat_w,
+                        "dat_r": wb_hbm.dat_r,
+                        "sel": wb_hbm.sel,
+                        "we": wb_hbm.we,
+                        "err": wb_hbm.err,
+                    },
+                    trigger = wb_hbm.stb & wb_hbm.cyc & (wb_hbm.ack | wb_hbm.err),
                     reset = self.reset.re,
                 )
                 self.submodules.axi_aw = BusCSRDebug(
                     description = {
                         "addr": axi.aw.addr,
-                        "burst": axi.aw.burst,
-                        "len": axi.aw.len,
-                        "size": axi.aw.size,
-                        "id": axi.aw.id,
+                        #  "burst": axi.aw.burst,
+                        #  "len": axi.aw.len,
+                        #  "size": axi.aw.size,
+                        #  "id": axi.aw.id,
                     },
                     trigger = axi.aw.valid & axi.aw.ready,
                     reset = self.reset.re,
@@ -358,7 +375,7 @@ class BaseSoC(SoCCore):
                     description = {
                         "data": axi.w.data,
                         "strb": axi.w.strb,
-                        "id": axi.w.id,
+                        #  "id": axi.w.id,
                     },
                     trigger = axi.w.valid & axi.w.ready,
                     reset = self.reset.re,
@@ -366,7 +383,7 @@ class BaseSoC(SoCCore):
                 self.submodules.axi_b = BusCSRDebug(
                     description = {
                         "resp": axi.b.resp,
-                        "id": axi.b.id,
+                        #  "id": axi.b.id,
                     },
                     trigger = axi.b.valid & axi.b.ready,
                     reset = self.reset.re,
@@ -374,10 +391,10 @@ class BaseSoC(SoCCore):
                 self.submodules.axi_ar = BusCSRDebug(
                     description = {
                         "addr": axi.ar.addr,
-                        "burst": axi.ar.burst,
-                        "len": axi.ar.len,
-                        "size": axi.ar.size,
-                        "id": axi.ar.id,
+                        #  "burst": axi.ar.burst,
+                        #  "len": axi.ar.len,
+                        #  "size": axi.ar.size,
+                        #  "id": axi.ar.id,
                     },
                     trigger = axi.ar.valid & axi.ar.ready,
                     reset = self.reset.re,
@@ -386,12 +403,12 @@ class BaseSoC(SoCCore):
                     description = {
                         "resp": axi.r.resp,
                         "data": axi.r.data,
-                        "id": axi.r.id,
+                        #  "id": axi.r.id,
                     },
                     trigger = axi.r.valid & axi.r.ready,
                     reset = self.reset.re,
                 )
-        self.submodules.debug = Debug(wb, axi)
+        self.submodules.debug = Debug()
         self.add_csr("debug")
 
 # Build --------------------------------------------------------------------------------------------
@@ -403,6 +420,7 @@ def main():
     parser.add_argument("--with-hbm", action="store_true", help="Use HBM")
     parser.add_argument("--with-full-wb2axi", action="store_true", help="Use full Wishbone2AXI")
     parser.add_argument("--l2-size",  type=int,            help="Set HBM L2 cache size")
+    parser.add_argument("--ndebug",   action="store_true", help="Set HBM L2 cache size")
     builder_args(parser)
     soc_core_args(parser)
     args = parser.parse_args()
@@ -410,7 +428,7 @@ def main():
     kwargs = soc_core_argdict(args)
     if args.l2_size is not None:
         kwargs["l2_size"] = args.l2_size
-    soc = BaseSoC(with_hbm=args.with_hbm, with_full_wb2axi=args.with_full_wb2axi, **kwargs)
+    soc = BaseSoC(with_hbm=args.with_hbm, with_full_wb2axi=args.with_full_wb2axi, debug=not args.ndebug, **kwargs)
     builder = Builder(soc, **builder_argdict(args))
     builder.build(run=args.build)
 
