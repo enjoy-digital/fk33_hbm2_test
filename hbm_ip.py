@@ -162,63 +162,6 @@ class HBMIP(Module, AutoCSR):
         self.rst_toggle = CSR()
         self.sync += If(self.rst_toggle.re, rst.eq(~rst))
 
-        # axi debuggig
-        axi = self.axi[0]
-        self.axi_debug_reset = CSR()
-
-        self.submodules.axi_aw_debug = BusCSRDebug(
-            description = {
-                "addr": axi.aw.addr,
-                "burst": axi.aw.burst,
-                "len": axi.aw.len,
-                "size": axi.aw.size,
-                "id": axi.aw.id,
-            },
-            trigger = axi.aw.valid & axi.aw.ready,
-            reset = self.axi_debug_reset.re,
-        )
-
-        self.submodules.axi_w_debug = BusCSRDebug(
-            description = {
-                "data": axi.w.data,
-                "strb": axi.w.strb,
-                "id": axi.w.id,
-            },
-            trigger = axi.w.valid & axi.w.ready,
-            reset = self.axi_debug_reset.re,
-        )
-
-        self.submodules.axi_b_debug = BusCSRDebug(
-            description = {
-                "resp": axi.b.resp,
-                "id": axi.b.id,
-            },
-            trigger = axi.b.valid & axi.b.ready,
-            reset = self.axi_debug_reset.re,
-        )
-
-        self.submodules.axi_ar_debug = BusCSRDebug(
-            description = {
-                "addr": axi.ar.addr,
-                "burst": axi.ar.burst,
-                "len": axi.ar.len,
-                "size": axi.ar.size,
-                "id": axi.ar.id,
-            },
-            trigger = axi.ar.valid & axi.ar.ready,
-            reset = self.axi_debug_reset.re,
-        )
-
-        self.submodules.axi_r_debug = BusCSRDebug(
-            description = {
-                "resp": axi.r.resp,
-                "data": axi.r.data,
-                "id": axi.r.id,
-            },
-            trigger = axi.r.valid & axi.r.ready,
-            reset = self.axi_debug_reset.re,
-        )
-
     def add_sources(self, platform):
         this_dir = os.path.dirname(os.path.abspath(os.path.realpath(__file__)))
         platform.add_ip(os.path.join(this_dir, "ip", "hbm", self.hbm_name + ".xci"))

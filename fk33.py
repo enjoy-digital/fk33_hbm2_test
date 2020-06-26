@@ -202,7 +202,8 @@ class _CRG(Module):
 # BaseSoC ------------------------------------------------------------------------------------------
 
 class BaseSoC(SoCCore):
-    def __init__(self, sys_clk_freq=int(450e6), with_hbm=False, with_full_wb2axi=False, **kwargs):
+    def __init__(self, sys_clk_freq=int(450e6), with_hbm=False, with_full_wb2axi=False, debug=True,
+                 **kwargs):
         platform = Platform()
 
         # SoCCore ----------------------------------------------------------------------------------
@@ -251,26 +252,25 @@ class BaseSoC(SoCCore):
             self.add_csr("wb_injector")
             wb_cpu = self.wb_injector.wb_slave
 
-            # Convertion: cpu.wishbone(32) <-> ... <-> hbm.axi(256)
+            wb_hbm = wishbone.Interface(data_width=axi_hbm.data_width)
+            l2_size = kwargs.get("l2_size", 8192)
+            if l2_size != 0:
+                print("  Adding L2 cache of size = %d" % l2_size)
+                print("=" * 80)
+                self.add_l2_cache(wb_cpu, wb_hbm,
+                                  l2_cache_size           = l2_size,
+                                  l2_cache_min_data_width = kwargs.get("min_l2_data_width", 128),
+                                  )
+            else:
+                print("  Using %d bits of data path" % wb_cpu.data_width)
+                print("=" * 80)
+                self.comb += wb_cpu.connect(wb_hbm)
+
             if not with_full_wb2axi:
                 print("=" * 80)
                 print("  Using Wishbone2AXILite")
                 print("=" * 80)
                 # wb_cpu -> (l2 cache) -> wb_hbm -> wb_wider -> (wb2axilite) -> axi_lite_hbm -> axi_hbm
-                wb_hbm = wishbone.Interface(data_width=axi_hbm.data_width)
-
-                l2_size = kwargs.get("l2_size", 8192)
-                if l2_size != 0:
-                    print("  Adding L2 cache of size = %d" % l2_size)
-                    print("=" * 80)
-                    self.add_l2_cache(wb_cpu, wb_hbm,
-                                      l2_cache_size           = l2_size,
-                                      l2_cache_min_data_width = kwargs.get("min_l2_data_width", 128),
-                                      )
-                else:
-                    print("  Using %d bits of data path" % wb_cpu.data_width)
-                    print("=" * 80)
-                    self.comb += wb_cpu.connect(wb_hbm)
 
                 wb_wider = wishbone.Interface(data_width=wb_hbm.data_width, adr_width=37 - 5)
                 self.comb += wb_hbm.connect(wb_wider)
@@ -282,38 +282,28 @@ class BaseSoC(SoCCore):
 
                 # fixed burst not supported by AXI HBM IP
                 self.submodules.axil2axi = AXILite2AXI(axi_lite_hbm, axi_hbm, burst_type="INCR")
-
-                self.submodules.wb_cpu_debug = BusCSRDebug(
-                    description = {
-                        "adr": wb_cpu.adr,
-                        "dat_w": wb_cpu.dat_w,
-                        "dat_r": wb_cpu.dat_r,
-                        "sel": wb_cpu.sel,
-                        "we": wb_cpu.we,
-                        "err": wb_cpu.err,
-                    },
-                    trigger = wb_cpu.stb & wb_cpu.cyc & (wb_cpu.ack | wb_cpu.err),
-                )
-                self.add_csr("wb_cpu_debug")
             else:
                 print("=" * 80)
                 print("  Using wb->wbp->axi")
                 print("=" * 80)
                 # wb_cpu -> (l2 cache) -> wb_hbm -> (wbc2pipe) -> wb_pipe -> (wb2axi) -> axi_hbm
-
                 # Add L2 Cache as we have to use 256-bit wishbone so that AxSIZE is 0b101 (256-bit)
                 # as it is the only one supported by the IP core
                 # Also, fixed address bursts are not supported (AxBURST=0b00)
-                wb_hbm = wishbone.Interface(data_width=axi_hbm.data_width)
-                self.add_l2_cache(wb_cpu, wb_hbm)
+
+                wb_wider = wishbone.Interface(data_width=wb_hbm.data_width, adr_width=37 - 5)
+                self.comb += wb_hbm.connect(wb_wider)
 
                 wb_pipe = wb2axi.WishbonePipelined(data_width=256, adr_width=32)
-                self.submodules.wbc2wbp = wb2axi.WishboneClassic2Pipeline(wb_hbm, wb_pipe)
+                self.submodules.wbc2wbp = wb2axi.WishboneClassic2Pipeline(wb_wider, wb_pipe)
                 self.wbc2wbp.add_sources(platform)
 
                 self.submodules.wb2axi = wb2axi.WishbonePipelined2AXI(
                     wb_pipe, axi_hbm, base_address=self.bus.regions["main_ram"].origin)
                 self.wb2axi.add_sources(platform)
+
+            if debug:
+                self.add_bus_debug_csrs(wb_cpu, axi_hbm)
 
     def add_l2_cache(self, wb_master, wb_slave,
                     l2_cache_size           = 8192,
@@ -336,6 +326,73 @@ class BaseSoC(SoCCore):
 
         self.submodules.l2_cache = l2_cache
         self.add_config("L2_SIZE", l2_cache_size)
+
+    def add_bus_debug_csrs(self, wb, axi):
+        class Debug(Module, AutoCSR):
+            def __init__(self, wb, axi):
+                self.reset = CSR()
+                self.submodules.wb = BusCSRDebug(
+                    description = {
+                        "adr": wb.adr,
+                        "dat_w": wb.dat_w,
+                        "dat_r": wb.dat_r,
+                        "sel": wb.sel,
+                        "we": wb.we,
+                        "err": wb.err,
+                    },
+                    trigger = wb.stb & wb.cyc & (wb.ack | wb.err),
+                    reset = self.reset.re,
+                )
+                self.submodules.axi_aw = BusCSRDebug(
+                    description = {
+                        "addr": axi.aw.addr,
+                        "burst": axi.aw.burst,
+                        "len": axi.aw.len,
+                        "size": axi.aw.size,
+                        "id": axi.aw.id,
+                    },
+                    trigger = axi.aw.valid & axi.aw.ready,
+                    reset = self.reset.re,
+                )
+                self.submodules.axi_w = BusCSRDebug(
+                    description = {
+                        "data": axi.w.data,
+                        "strb": axi.w.strb,
+                        "id": axi.w.id,
+                    },
+                    trigger = axi.w.valid & axi.w.ready,
+                    reset = self.reset.re,
+                )
+                self.submodules.axi_b = BusCSRDebug(
+                    description = {
+                        "resp": axi.b.resp,
+                        "id": axi.b.id,
+                    },
+                    trigger = axi.b.valid & axi.b.ready,
+                    reset = self.reset.re,
+                )
+                self.submodules.axi_ar = BusCSRDebug(
+                    description = {
+                        "addr": axi.ar.addr,
+                        "burst": axi.ar.burst,
+                        "len": axi.ar.len,
+                        "size": axi.ar.size,
+                        "id": axi.ar.id,
+                    },
+                    trigger = axi.ar.valid & axi.ar.ready,
+                    reset = self.reset.re,
+                )
+                self.submodules.axi_r = BusCSRDebug(
+                    description = {
+                        "resp": axi.r.resp,
+                        "data": axi.r.data,
+                        "id": axi.r.id,
+                    },
+                    trigger = axi.r.valid & axi.r.ready,
+                    reset = self.reset.re,
+                )
+        self.submodules.debug = Debug(wb, axi)
+        self.add_csr("debug")
 
 # Build --------------------------------------------------------------------------------------------
 
