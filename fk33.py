@@ -8,6 +8,7 @@ import argparse
 from math import log2
 
 from migen import *
+from migen.genlib.misc import WaitTimer
 
 from litex.build.generic_platform import *
 from litex.build.xilinx import XilinxPlatform, VivadoProgrammer
@@ -122,13 +123,39 @@ class WishboneSoftControl(Module, AutoCSR):
             wb.stb.eq(1),
             If(wb.ack,
                If(wb.err,
-                   NextValue(data, 0xbaadc0de),
+                   NextValue(data, 0xdec0adba),
                ).Else(
                    NextValue(self.data.storage, wb.dat_r),
                ),
                NextState("IDLE")
             ),
         )
+
+class WishboneGuard(Module, AutoCSR):
+    def __init__(self, master, timeout_clocks):
+        self.master = master
+        self.slave = slave = wishbone.Interface.like(master)
+
+        self.timeouts = CSRStatus(32)
+        timeouts_inc = Signal()
+        self.sync += If(timeouts_inc, self.timeouts.status.eq(self.timeouts.status + 1))
+
+        timer = WaitTimer(int(timeout_clocks))
+
+        self.comb += [
+            master.connect(slave, omit={"dat_r", "err", "ack"}),
+            timer.wait.eq(master.cyc & master.stb & ~master.ack),
+            If(~timer.done,
+                master.ack.eq(slave.ack),
+                master.err.eq(slave.err),
+                master.dat_r.eq(slave.dat_r),
+            ).Else(
+                master.ack.eq(1),
+                master.err.eq(1),
+                master.dat_r.eq(0xdec0adba),
+                timeouts_inc.eq(1)
+            )
+        ]
 
 # IOs ----------------------------------------------------------------------------------------------
 
@@ -233,13 +260,19 @@ class BaseSoC(SoCCore):
             ))
             self.bus.add_slave("main_ram", wb_cpu)
 
+            self.submodules.wb_guard = WishboneGuard(wb_cpu, timeout_clocks=10e-6 * sys_clk_freq)  # 10 us timeout
+            self.add_csr("wb_guard")
+            wb_cpu = self.wb_guard.slave
+
             class WishboneSoftInjector(Module, AutoCSR):
                 def __init__(self, wb_cpu, wb_csr):
                     self.wb_slave = wishbone.Interface.like(wb_cpu)
-                    self.soft_control = CSRStorage()
+                    self.soft_control = CSRStorage(reset=1)
                     self.comb += [
                         If(self.soft_control.storage,
-                           wb_csr.connect(self.wb_slave)
+                           wb_csr.connect(self.wb_slave),
+                           wb_cpu.dat_r.eq(0xdec0adba),
+                           wb_cpu.ack.eq(wb_cpu.cyc & wb_cpu.stb),
                         ).Else(
                            wb_cpu.connect(self.wb_slave)
                         )
