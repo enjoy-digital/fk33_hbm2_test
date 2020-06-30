@@ -8,28 +8,6 @@ from litex.soc.integration.builder import *
 from litex.soc.interconnect.axi import *
 
 
-class BusCSRDebug(Module, AutoCSR):
-    def __init__(self, description, trigger, reset=None):
-        if reset is None:
-            self.reset = CSR()
-            reset = self.reset.re
-        self.count = CSRStatus(32)
-
-        updates = []
-        for name, signal in description.items():
-            csr = CSRStatus(len(signal), name=name)
-            setattr(self, name, csr)
-            updates.append(csr.status.eq(signal))
-
-        self.sync += [
-            If(reset, self.count.status.eq(0)),
-            If(trigger,
-                self.count.status.eq(self.count.status + 1),
-               *updates,
-            ),
-        ]
-
-
 class HBMIP(Module, AutoCSR):
     """Xilinx Virtex US+ High Bandwidth Memory IP wrapper"""
     def __init__(self, platform, hbm_ip_name="hbm_0"):
@@ -138,15 +116,6 @@ class HBMIP(Module, AutoCSR):
         # CSRs -------------------------------------------------------------------------------------
         self.init_done = CSRStatus()
         self.comb += self.init_done.status.eq(self.apb_complete[0] & self.apb_complete[1])
-        self.apb_done = CSRStatus(2)
-        self.comb += self.apb_done.status.eq(Cat(self.apb_complete[0], self.apb_complete[1]))
-
-        self.clk_resets = CSRStatus(fields=[
-            CSRField("apb", 1),
-            CSRField("axi", 1),
-        ])
-        self.comb += self.clk_resets.fields.apb.eq(~ResetSignal("apb"))
-        self.comb += self.clk_resets.fields.axi.eq(~ResetSignal("axi"))
 
         self.csr_cattrip_0 = CSRStatus(1, name="dram_stat_cattrip_0")
         self.csr_cattrip_1 = CSRStatus(1, name="dram_stat_cattrip_1")
@@ -161,6 +130,19 @@ class HBMIP(Module, AutoCSR):
 
         self.rst_toggle = CSR()
         self.sync += If(self.rst_toggle.re, rst.eq(~rst))
+
+        self.add_debug_csrs()
+
+    def add_debug_csrs(self):
+        self.apb_done = CSRStatus(2)
+        self.comb += self.apb_done.status.eq(Cat(self.apb_complete[0], self.apb_complete[1]))
+
+        self.clk_resets = CSRStatus(fields=[
+            CSRField("apb", 1),
+            CSRField("axi", 1),
+        ])
+        self.comb += self.clk_resets.fields.apb.eq(~ResetSignal("apb"))
+        self.comb += self.clk_resets.fields.axi.eq(~ResetSignal("axi"))
 
     def add_sources(self, platform):
         this_dir = os.path.dirname(os.path.abspath(os.path.realpath(__file__)))

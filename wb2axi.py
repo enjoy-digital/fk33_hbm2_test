@@ -1,5 +1,4 @@
 import os
-import copy
 
 from migen import *
 

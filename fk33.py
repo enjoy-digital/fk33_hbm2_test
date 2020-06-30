@@ -8,7 +8,6 @@ import argparse
 from math import log2
 
 from migen import *
-from migen.genlib.misc import WaitTimer
 
 from litex.build.generic_platform import *
 from litex.build.xilinx import XilinxPlatform, VivadoProgrammer
@@ -19,143 +18,12 @@ from litex.soc.integration.builder import *
 from litex.soc.integration.soc import SoCRegion
 from litex.soc.cores.led import LedChaser
 from litex.soc.interconnect import wishbone, axi
-from litex.soc.interconnect.axi import AXIInterface, AXILiteInterface
+from litex.soc.interconnect.axi import AXILiteInterface
 
-from hbm_ip import HBMIP, BusCSRDebug
+from hbm_ip import HBMIP
+from debug import BusCSRDebug, WishboneSoftControl, WishboneGuard, WishboneSoftInjector
+from axil2axi import AXILite2AXI
 import wb2axi
-
-
-class AXILite2AXI(Module):
-    def __init__(self, axi_lite, axi, write_id=0, read_id=0, burst_type='FIXED'):
-        assert isinstance(axi_lite, AXILiteInterface)
-        assert isinstance(axi, AXIInterface)
-        assert axi_lite.data_width == axi.data_width
-        assert axi_lite.address_width == axi.address_width
-
-        burst_size = log2_int(axi.data_width // 8)
-        # burst type has no meaning as we use burst length of 1, but the AXI slave may requires
-        # certain type of burst
-        burst_type = {
-            'FIXED': 0b00,
-            'INCR': 0b01,
-            'WRAP': 0b10,
-        }[burst_type]
-
-        self.comb += [
-            axi.aw.valid.eq(axi_lite.aw.valid),
-            axi_lite.aw.ready.eq(axi.aw.ready),
-            axi.aw.addr.eq(axi_lite.aw.addr),
-            axi.aw.burst.eq(burst_type),
-            axi.aw.len.eq(0),
-            axi.aw.size.eq(burst_size),
-            axi.aw.lock.eq(0),
-            axi.aw.prot.eq(0),
-            axi.aw.cache.eq(0b0011),
-            axi.aw.qos.eq(0),
-            axi.aw.id.eq(write_id),
-
-            axi.w.valid.eq(axi_lite.w.valid),
-            axi_lite.w.ready.eq(axi.w.ready),
-            axi.w.data.eq(axi_lite.w.data),
-            axi.w.strb.eq(axi_lite.w.strb),
-            axi.w.last.eq(1),
-
-            axi_lite.b.valid.eq(axi.b.valid),
-            axi_lite.b.resp.eq(axi.b.resp),
-            axi.b.ready.eq(axi_lite.b.ready),
-
-            axi.ar.valid.eq(axi_lite.ar.valid),
-            axi_lite.ar.ready.eq(axi.ar.ready),
-            axi.ar.addr.eq(axi_lite.ar.addr),
-            axi.ar.burst.eq(burst_type),
-            axi.ar.len.eq(0),
-            axi.ar.size.eq(burst_size),
-            axi.ar.lock.eq(0),
-            axi.ar.prot.eq(0),
-            axi.ar.cache.eq(0b0011),
-            axi.ar.qos.eq(0),
-            axi.ar.id.eq(read_id),
-
-            axi_lite.r.valid.eq(axi.r.valid),
-            axi_lite.r.resp.eq(axi.r.resp),
-            axi_lite.r.data.eq(axi.r.data),
-            axi.r.ready.eq(axi_lite.r.ready),
-        ]
-
-class WishboneSoftControl(Module, AutoCSR):
-    def __init__(self, wb):
-        self.wb = wb
-        self.write = CSR()
-        self.read = CSR()
-        self.data = CSRStorage(wb.data_width)
-        self.adr = CSRStorage(wb.adr_width)
-        adr = Signal(wb.adr_width)
-        data = Signal(wb.data_width)
-
-        self.submodules.fsm = FSM()
-        self.fsm.act("IDLE",
-            If(self.write.re,
-                NextValue(adr, self.adr.storage),
-                NextValue(data, self.data.storage),
-                NextState("WRITE")
-            ),
-            If(self.read.re,
-                NextValue(adr, self.adr.storage),
-                NextState("READ")
-            ),
-        )
-        self.fsm.act("WRITE",
-            wb.adr.eq(adr),
-            wb.dat_w.eq(data),
-            wb.sel.eq(2**len(wb.sel) - 1),
-            wb.we.eq(1),
-            wb.cyc.eq(1),
-            wb.stb.eq(1),
-            If(wb.ack,
-               NextState("IDLE")
-            ),
-        )
-        self.fsm.act("READ",
-            wb.adr.eq(adr),
-            wb.sel.eq(2**len(wb.sel) - 1),
-            wb.we.eq(0),
-            wb.cyc.eq(1),
-            wb.stb.eq(1),
-            If(wb.ack,
-               If(wb.err,
-                   NextValue(data, 0xdec0adba),
-               ).Else(
-                   NextValue(self.data.storage, wb.dat_r),
-               ),
-               NextState("IDLE")
-            ),
-        )
-
-class WishboneGuard(Module, AutoCSR):
-    def __init__(self, master, timeout_clocks):
-        self.master = master
-        self.slave = slave = wishbone.Interface.like(master)
-
-        self.timeouts = CSRStatus(32)
-        timeouts_inc = Signal()
-        self.sync += If(timeouts_inc, self.timeouts.status.eq(self.timeouts.status + 1))
-
-        timer = WaitTimer(int(timeout_clocks))
-
-        self.comb += [
-            master.connect(slave, omit={"dat_r", "err", "ack"}),
-            timer.wait.eq(master.cyc & master.stb & ~master.ack),
-            If(~timer.done,
-                master.ack.eq(slave.ack),
-                master.err.eq(slave.err),
-                master.dat_r.eq(slave.dat_r),
-            ).Else(
-                master.ack.eq(1),
-                master.err.eq(1),
-                master.dat_r.eq(0xdec0adba),
-                timeouts_inc.eq(1)
-            )
-        ]
 
 # IOs ----------------------------------------------------------------------------------------------
 
@@ -196,7 +64,7 @@ class Platform(XilinxPlatform):
     default_clk_period = 1e9/200e6
 
     def __init__(self):
-        XilinxPlatform.__init__(self, "xcvu33p-fsvh2104-2L-e-es1", _io, toolchain="vivado")
+        XilinxPlatform.__init__(self, "xcvu33p-fsvh2104-2L-e", _io, toolchain="vivado")
 
     def create_programmer(self):
         return VivadoProgrammer()
@@ -260,24 +128,12 @@ class BaseSoC(SoCCore):
             ))
             self.bus.add_slave("main_ram", wb_cpu)
 
-            self.submodules.wb_guard = WishboneGuard(wb_cpu, timeout_clocks=10e-6 * sys_clk_freq)  # 10 us timeout
+            # Count timeouts on main_ram bus and disconnect it when we exceed limit
+            self.submodules.wb_guard = WishboneGuard(wb_cpu)
             self.add_csr("wb_guard")
             wb_cpu = self.wb_guard.slave
 
-            class WishboneSoftInjector(Module, AutoCSR):
-                def __init__(self, wb_cpu, wb_csr):
-                    self.wb_slave = wishbone.Interface.like(wb_cpu)
-                    self.soft_control = CSRStorage(reset=1)
-                    self.comb += [
-                        If(self.soft_control.storage,
-                           wb_csr.connect(self.wb_slave),
-                           wb_cpu.dat_r.eq(0xdec0adba),
-                           wb_cpu.ack.eq(wb_cpu.cyc & wb_cpu.stb),
-                        ).Else(
-                           wb_cpu.connect(self.wb_slave)
-                        )
-                    ]
-
+            # Option to switch between software/hardware control
             wb_soft = wishbone.Interface.like(wb_cpu)
             self.submodules.wb_softcontrol = WishboneSoftControl(wb_soft)
             self.add_csr("wb_softcontrol")
@@ -285,6 +141,8 @@ class BaseSoC(SoCCore):
             self.add_csr("wb_injector")
             wb_cpu = self.wb_injector.wb_slave
 
+            # Make sure to use 256-bit wishbone so that  we have correct AxSIZE=0b101 (356-bit)
+            # Insert L2 cache or use only part of CPU bus data width
             wb_hbm = wishbone.Interface(data_width=axi_hbm.data_width)
             l2_size = kwargs.get("l2_size", 8192)
             if l2_size != 0:
@@ -293,39 +151,37 @@ class BaseSoC(SoCCore):
                 print("=" * 80)
                 self.add_l2_cache(wb_cpu, wb_hbm,
                                   l2_cache_size           = l2_size,
-                                  l2_cache_min_data_width = kwargs.get("min_l2_data_width", 128),
-                                  )
-
+                                  l2_cache_min_data_width = kwargs.get("min_l2_data_width", 128))
             else:
+                print("=" * 80)
                 print("  Using %d bits of data path" % wb_cpu.data_width)
                 print("=" * 80)
                 self.comb += wb_cpu.connect(wb_hbm)
 
-            # if L2 cache is present, it will shift the address, so we need to use a shifted origin
+            # If L2 cache is present, it will shift the address, so we need to use a shifted origin
             origin = self.mem_map["main_ram"] // (wb_hbm.data_width // wb_cpu.data_width)
 
             if not with_full_wb2axi:
+                # Use native Litex primities to convert from wishbone to AXI
+                # wb_cpu -> (l2 cache) -> wb_hbm -> wb_wider -> (wb2axilite) -> axi_lite_hbm -> axi_hbm
                 print("  Using Wishbone2AXILite")
                 print("=" * 80)
-                # wb_cpu -> (l2 cache) -> wb_hbm -> wb_wider -> (wb2axilite) -> axi_lite_hbm -> axi_hbm
 
                 wb_wider = wishbone.Interface(data_width=wb_hbm.data_width, adr_width=37 - 5)
                 self.comb += wb_hbm.connect(wb_wider)
 
-                axi_lite_hbm = axi.AXILiteInterface(data_width=axi_hbm.data_width, address_width=axi_hbm.address_width)
-                self.submodules.wb2axi = axi.Wishbone2AXILite(
-                    wb_wider, axi_lite_hbm,
-                    base_address=origin)
+                axi_lite_hbm = axi.AXILiteInterface(data_width=axi_hbm.data_width,
+                                                    address_width=axi_hbm.address_width)
+                self.submodules.wb2axi = axi.Wishbone2AXILite(wb_wider, axi_lite_hbm,
+                                                              base_address=origin)
 
-                # fixed burst not supported by AXI HBM IP
+                # Fixed burst is not supported by AXI HBM IP
                 self.submodules.axil2axi = AXILite2AXI(axi_lite_hbm, axi_hbm, burst_type="INCR")
             else:
+                # Use pipelined wishbone to AXI
+                # wb_cpu -> (l2 cache) -> wb_hbm -> (wbc2pipe) -> wb_pipe -> (wb2axi) -> axi_hbm
                 print("  Using wb->wbp->axi")
                 print("=" * 80)
-                # wb_cpu -> (l2 cache) -> wb_hbm -> (wbc2pipe) -> wb_pipe -> (wb2axi) -> axi_hbm
-                # Add L2 Cache as we have to use 256-bit wishbone so that AxSIZE is 0b101 (256-bit)
-                # as it is the only one supported by the IP core
-                # Also, fixed address bursts are not supported (AxBURST=0b00)
 
                 wb_wider = wishbone.Interface(data_width=wb_hbm.data_width, adr_width=37 - 5)
                 self.comb += wb_hbm.connect(wb_wider)
@@ -334,14 +190,18 @@ class BaseSoC(SoCCore):
                 self.submodules.wbc2wbp = wb2axi.WishboneClassic2Pipeline(wb_wider, wb_pipe)
                 self.wbc2wbp.add_sources(platform)
 
-                self.submodules.wb2axi = wb2axi.WishbonePipelined2AXI(
-                    wb_pipe, axi_hbm, base_address=origin)
+                self.submodules.wb2axi = wb2axi.WishbonePipelined2AXI(wb_pipe, axi_hbm,
+                                                                      base_address=origin)
                 self.wb2axi.add_sources(platform)
 
             if debug:
                 print("  Adding debug CSRs")
                 print("=" * 80)
                 self.add_bus_debug_csrs(wb_cpu, wb_hbm, axi_hbm)
+
+    def do_finalize(self):
+        super().do_finalize()
+        self.comb += self.wb_guard.timeout.eq(self.bus_interconnect.timeout.error)
 
     def add_l2_cache(self, wb_master, wb_slave,
                     l2_cache_size           = 8192,
