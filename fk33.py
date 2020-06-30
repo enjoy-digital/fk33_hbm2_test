@@ -22,6 +22,31 @@ from litepcie.frontend.dma import LitePCIeDMA
 from litepcie.frontend.wishbone import LitePCIeWishboneBridge
 from litepcie.software import generate_litepcie_software
 
+# Use ----------------------------------------------------------------------------------------------
+
+# Build and load bitstream:
+# -------------------------
+# ./fk33.py --driver --build --load
+# reboot computer
+
+# Build and load kernel module:
+# -----------------------------
+# cd build/fk33/driver/kernel
+# make clean all
+# sudo ./init.sh
+#
+# Create bridge:
+# --------------
+# sudo litex_server --pcie --pcie-bar=/sys/bus/pci/devices/0000\:01\:00.0/resource0
+
+# Use scripts:
+# -------------
+# ./test_regs.py
+# ./litescope_wishbone.py (--help to see preconfigured triggers)
+
+# Use console:
+# litex_crossover_uart --base-address=-0x82000000 (will create /dev/pts/X)
+# litex_term /dev/ptsX
 
 # IOs ----------------------------------------------------------------------------------------------
 
@@ -52,16 +77,6 @@ _io = [
         Subsignal("rx_n",  Pins("AL1 AM3 AK3 AN1")),
         Subsignal("tx_p",  Pins("Y5  AA7 AB5 AC7")),
         Subsignal("tx_n",  Pins("Y4  AA6 AB4 AC6")),
-    ),
-
-    ("pcie_x16", 0,
-        Subsignal("rst_n", Pins("BE24"), IOStandard("LVCMOS18")),
-        Subsignal("clk_p", Pins("AD9")),
-        Subsignal("clk_n", Pins("AD8")),
-        Subsignal("rx_p",  Pins("AL2 AM4 AK4 AN2 AP4 AR2 AT4 AU2 AV4 AW2 BA2 BC2 AY4 BB4 BD4 BE6")),
-        Subsignal("rx_n",  Pins("AL1 AM3 AK3 AN1 AP3 AR1 AT3 AU1 AV3 AW1 BA1 BC1 AY3 BB3 BD3 BE5")),
-        Subsignal("tx_p",  Pins("Y5  AA7 AB5 AC7 AD5 AF5 AE7 AH5 AG7 AJ7 AL7 AM9 AN7 AP9 AR7 AT9")),
-        Subsignal("tx_n",  Pins("Y4  AA6 AB4 AC6 AD4 AF4 AE6 AH4 AG6 AJ6 AL6 AM8 AN6 AP8 AR6 AT8")),
     ),
 ]
 
@@ -103,8 +118,14 @@ class BaseSoC(SoCCore):
     def __init__(self, sys_clk_freq=int(125e6), **kwargs):
         platform = Platform()
 
+        kwargs["uart_name"]      = "crossover"
+        kwargs["csr_data_width"] = 32
+
         # SoCCore ----------------------------------------------------------------------------------
-        SoCCore.__init__(self, platform, clk_freq=sys_clk_freq, **kwargs)
+        SoCCore.__init__(self, platform, sys_clk_freq,
+            ident          = "LiteX SoC on Forest Kitten 33",
+            ident_version  = True,
+            **kwargs)
 
         # CRG --------------------------------------------------------------------------------------
         self.submodules.crg = _CRG(platform, sys_clk_freq)
@@ -136,13 +157,7 @@ class BaseSoC(SoCCore):
             with_loopback  = True)
         self.add_csr("pcie_dma0")
 
-        # DMA1
-        self.submodules.pcie_dma1 = LitePCIeDMA(self.pcie_phy, self.pcie_endpoint,
-            with_buffering = True, buffering_depth=1024,
-            with_loopback  = True)
-        self.add_csr("pcie_dma1")
-
-        self.add_constant("DMA_CHANNELS", 2)
+        self.add_constant("DMA_CHANNELS", 1)
 
         # MSI
         self.submodules.pcie_msi = LitePCIeMSI()
@@ -151,8 +166,6 @@ class BaseSoC(SoCCore):
         self.interrupts = {
             "PCIE_DMA0_WRITER":    self.pcie_dma0.writer.irq,
             "PCIE_DMA0_READER":    self.pcie_dma0.reader.irq,
-            "PCIE_DMA1_WRITER":    self.pcie_dma1.writer.irq,
-            "PCIE_DMA1_READER":    self.pcie_dma1.reader.irq,
         }
         for i, (k, v) in enumerate(sorted(self.interrupts.items())):
             self.comb += self.pcie_msi.irqs[i].eq(v)
@@ -164,19 +177,31 @@ class BaseSoC(SoCCore):
             sys_clk_freq = sys_clk_freq)
         self.add_csr("leds")
 
+        # Analyzer ---------------------------------------------------------------------------------
+        from litescope import LiteScopeAnalyzer
+        analyzer_signals = [
+            self.cpu.reset,
+            self.cpu.periph_buses[0],
+            self.cpu.periph_buses[1],
+        ]
+        self.submodules.analyzer = LiteScopeAnalyzer(analyzer_signals,
+            depth        = 2048,
+            clock_domain = "sys",
+            csr_csv      = "analyzer.csv")
+        self.add_csr("analyzer")
+
 # Build --------------------------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(description="LiteX SoC on Forest Kitten 33")
-    parser.add_argument("--build", action="store_true", help="Build bitstream")
+    parser.add_argument("--build",  action="store_true", help="Build bitstream")
     parser.add_argument("--driver", action="store_true", help="Generate LitePCIe driver")
-    parser.add_argument("--load",  action="store_true", help="Load bitstream")
-    builder_args(parser)
+    parser.add_argument("--load",   action="store_true", help="Load bitstream")
     soc_core_args(parser)
     args = parser.parse_args()
 
     soc = BaseSoC(**soc_core_argdict(args))
-    builder = Builder(soc, **builder_argdict(args))
+    builder = Builder(soc, output_dir="build/fk33", csr_csv="csr.csv")
     builder.build(run=args.build)
 
     if args.driver:
