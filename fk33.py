@@ -293,7 +293,8 @@ class BaseSoC(SoCCore):
 
     def do_finalize(self):
         super().do_finalize()
-        self.comb += self.wb_guard.timeout.eq(self.bus_interconnect.timeout.error)
+        if hasattr(self, "wb_guard"):
+            self.comb += self.wb_guard.timeout.eq(self.bus_interconnect.timeout.error)
 
     def add_l2_cache(self, wb_master, wb_slave,
                     l2_cache_size           = 8192,
