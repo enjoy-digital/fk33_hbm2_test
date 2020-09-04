@@ -16,7 +16,7 @@ from litex.soc.integration.soc_core import *
 from litex.soc.integration.builder import *
 from litex.soc.cores.led import LedChaser
 
-from litepcie.phy.usppciephy import USPPCIEPHY
+from litepcie.phy.usppciephy import USPHBMPCIEPHY
 from litepcie.core import LitePCIeEndpoint, LitePCIeMSI
 from litepcie.frontend.dma import LitePCIeDMA
 from litepcie.frontend.wishbone import LitePCIeWishboneBridge
@@ -132,7 +132,7 @@ class BaseSoC(SoCCore):
 
         # PCIe -------------------------------------------------------------------------------------
         # PHY
-        self.submodules.pcie_phy = USPPCIEPHY(platform, platform.request("pcie_x4"),
+        self.submodules.pcie_phy = USPHBMPCIEPHY(platform, platform.request("pcie_x4"),
             data_width = 128,
             bar0_size  = 0x20000
         )
