@@ -1,3 +1,10 @@
+#
+# This file is part of FK33-HBM2 project.
+#
+# Copyright (c) 2020-2021 Florent Kermarrec <florent@enjoy-digital.fr>
+# Copyright (c) 2020 Antmicro <www.antmicro.com>
+# SPDX-License-Identifier: BSD-2-Clause
+
 import os
 
 from migen import *
@@ -6,125 +13,112 @@ from litex.soc.cores.clock import *
 from litex.soc.integration.soc_core import *
 from litex.soc.integration.builder import *
 from litex.soc.interconnect.axi import *
-
+from litex.soc.interconnect.csr import *
 
 class HBMIP(Module, AutoCSR):
-    """Xilinx Virtex US+ High Bandwidth Memory IP wrapper"""
+    """Xilinx Virtex US+ High Bandwidth Memory 2 IP wrapper"""
     def __init__(self, platform, hbm_ip_name="hbm_0"):
         self.platform = platform
         self.hbm_name = hbm_ip_name
 
         self.axi = []
         self.apb = []
-        self.apb_complete = []
-        # TODO: use it to disable AXI/APB
-        self.dram_stat_cattrip = []  # high when temp > 120C, disable memory access if it happens
-        self.dram_stat_temp = []  # temp in degree Celsius
 
-        self.hbm_params = params = {}
+        self.hbm_params = {}
 
         self.init_done = CSRStatus()
 
+        # # #
+
+        class Open(Signal): pass
+
         # Clocks -----------------------------------------------------------------------------------
-        # ref = 100 MHz (HBM: 900 (225-900) MHz)
-        # drives internal PLL (1 per stack)
+        # Ref = 100 MHz (HBM: 900 (225-900) MHz), drives internal PLL (1 per stack).
         for i in range(2):
-            params[f"i_HBM_REF_CLK_{i:1d}"] = ClockSignal("hbm_ref")
+            self.hbm_params[f"i_HBM_REF_CLK_{i:1d}"] = ClockSignal("hbm_ref")
 
         # APB: 100 (50-100) MHz
         for i in range(2):
-            params[f"i_APB_{i:1d}_PCLK"] = ClockSignal("apb")
-            params[f"i_APB_{i:1d}_PRESET_N"] = ResetSignal("apb")
+            self.hbm_params[f"i_APB_{i:1d}_PCLK"]     = ClockSignal("apb")
+            self.hbm_params[f"i_APB_{i:1d}_PRESET_N"] = ~ResetSignal("apb")
 
         # AXI: 450 (225-450) MHz
         for i in range(32):
-            params[f"i_AXI_{i:02d}_ACLK"] = ClockSignal("axi")
-            params[f"i_AXI_{i:02d}_ARESET_N"] = ResetSignal("axi")
+            self.hbm_params[f"i_AXI_{i:02d}_ACLK"]     = ClockSignal("axi")
+            self.hbm_params[f"i_AXI_{i:02d}_ARESET_N"] = ~ResetSignal("apb")
 
         # AXI --------------------------------------------------------------------------------------
         for i in range(32):
-            axi = AXIInterface(data_width=256, address_width=37, id_width=6)
+            axi = AXIInterface(data_width=256, address_width=33, id_width=6)
             self.axi.append(axi)
 
-            # ax_description()
-            # master -> slave
-            params[f"i_AXI_{i:02d}_AWADDR"]       = axi.aw.addr
-            params[f"i_AXI_{i:02d}_AWBURST"]      = axi.aw.burst
-            params[f"i_AXI_{i:02d}_AWID"]         = axi.aw.id
-            params[f"i_AXI_{i:02d}_AWLEN"]        = axi.aw.len
-            params[f"i_AXI_{i:02d}_AWSIZE"]       = axi.aw.size
-            params[f"i_AXI_{i:02d}_AWVALID"]      = axi.aw.valid
-            params[f"i_AXI_{i:02d}_ARADDR"]       = axi.ar.addr
-            params[f"i_AXI_{i:02d}_ARBURST"]      = axi.ar.burst
-            params[f"i_AXI_{i:02d}_ARID"]         = axi.ar.id
-            params[f"i_AXI_{i:02d}_ARLEN"]        = axi.ar.len
-            params[f"i_AXI_{i:02d}_ARSIZE"]       = axi.ar.size
-            params[f"i_AXI_{i:02d}_ARVALID"]      = axi.ar.valid
-            # slave -> master
-            params[f"o_AXI_{i:02d}_AWREADY"]      = axi.aw.ready
-            params[f"o_AXI_{i:02d}_ARREADY"]      = axi.ar.ready
-            # w_description()
-            # master -> slave
-            params[f"i_AXI_{i:02d}_WDATA"]        = axi.w.data
-            params[f"i_AXI_{i:02d}_WLAST"]        = axi.w.last
-            params[f"i_AXI_{i:02d}_WSTRB"]        = axi.w.strb
-            params[f"i_AXI_{i:02d}_WDATA_PARITY"] = Constant(0)  # w=32 FIXME
-            params[f"i_AXI_{i:02d}_WVALID"]       = axi.w.valid
-            # slave -> master
-            params[f"o_AXI_{i:02d}_WREADY"]       = axi.w.ready
-            # b_description()
-            # master -> slave
-            params[f"i_AXI_{i:02d}_BREADY"]       = axi.b.ready
-            # slave -> master
-            params[f"o_AXI_{i:02d}_BID"]          = axi.b.id
-            params[f"o_AXI_{i:02d}_BRESP"]        = axi.b.resp
-            params[f"o_AXI_{i:02d}_BVALID"]       = axi.b.valid
-            # r_description()
-            # master -> slave
-            params[f"i_AXI_{i:02d}_RREADY"]       = axi.r.ready
-            # slave -> master
-            params[f"o_AXI_{i:02d}_RDATA_PARITY"] = Signal(32)  # FIXME
-            params[f"o_AXI_{i:02d}_RDATA"]        = axi.r.data
-            params[f"o_AXI_{i:02d}_RID"]          = axi.r.id
-            params[f"o_AXI_{i:02d}_RLAST"]        = axi.r.last
-            params[f"o_AXI_{i:02d}_RRESP"]        = axi.r.resp
-            params[f"o_AXI_{i:02d}_RVALID"]       = axi.r.valid
+            # AW Channel.
+            self.hbm_params[f"i_AXI_{i :02d}_AWADDR"]      = axi.aw.addr
+            self.hbm_params[f"i_AXI_{i :02d}_AWBURST"]     = axi.aw.burst
+            self.hbm_params[f"i_AXI_{i :02d}_AWID"]        = axi.aw.id
+            self.hbm_params[f"i_AXI_{i :02d}_AWLEN"]       = axi.aw.len
+            self.hbm_params[f"i_AXI_{i :02d}_AWSIZE"]      = axi.aw.size
+            self.hbm_params[f"i_AXI_{i :02d}_AWVALID"]     = axi.aw.valid
+            self.hbm_params[f"o_AXI_{i :02d}_AWREADY"]     = axi.aw.ready
+
+            # W Channel.
+            self.hbm_params[f"i_AXI_{i:02d}_WDATA"]        = axi.w.data
+            self.hbm_params[f"i_AXI_{i:02d}_WLAST"]        = axi.w.last
+            self.hbm_params[f"i_AXI_{i:02d}_WSTRB"]        = axi.w.strb
+            self.hbm_params[f"i_AXI_{i:02d}_WDATA_PARITY"] = 0 # FIXME: Manage parity?
+            self.hbm_params[f"i_AXI_{i:02d}_WVALID"]       = axi.w.valid
+            self.hbm_params[f"o_AXI_{i:02d}_WREADY"]       = axi.w.ready
+
+            # B Channel.
+            self.hbm_params[f"o_AXI_{i:02d}_BID"]          = axi.b.id
+            self.hbm_params[f"o_AXI_{i:02d}_BRESP"]        = axi.b.resp
+            self.hbm_params[f"o_AXI_{i:02d}_BVALID"]       = axi.b.valid
+            self.hbm_params[f"i_AXI_{i:02d}_BREADY"]       = axi.b.ready
+
+            # AR Channel.
+            self.hbm_params[f"i_AXI_{i:02d}_ARADDR"]       = axi.ar.addr
+            self.hbm_params[f"i_AXI_{i:02d}_ARBURST"]      = axi.ar.burst
+            self.hbm_params[f"i_AXI_{i:02d}_ARID"]         = axi.ar.id
+            self.hbm_params[f"i_AXI_{i:02d}_ARLEN"]        = axi.ar.len
+            self.hbm_params[f"i_AXI_{i:02d}_ARSIZE"]       = axi.ar.size
+            self.hbm_params[f"i_AXI_{i:02d}_ARVALID"]      = axi.ar.valid
+            self.hbm_params[f"o_AXI_{i:02d}_ARREADY"]      = axi.ar.ready
+
+            # R Channel.
+            self.hbm_params[f"o_AXI_{i:02d}_RDATA_PARITY"] = Open() # FIXME: Manage parity?
+            self.hbm_params[f"o_AXI_{i:02d}_RDATA"]        = axi.r.data
+            self.hbm_params[f"o_AXI_{i:02d}_RID"]          = axi.r.id
+            self.hbm_params[f"o_AXI_{i:02d}_RLAST"]        = axi.r.last
+            self.hbm_params[f"o_AXI_{i:02d}_RRESP"]        = axi.r.resp
+            self.hbm_params[f"o_AXI_{i:02d}_RVALID"]       = axi.r.valid
+            self.hbm_params[f"i_AXI_{i:02d}_RREADY"]       = axi.r.ready
 
         # APB --------------------------------------------------------------------------------------
-        # FIXME: wb <-> apb
+        # FIXME: Connect to CSR or Wishbone.
+        apb_complete = Signal(2)
         for i in range(2):
-            params[f"i_APB_{i:1d}_PWDATA"]  = Constant(0)  # w=32
-            params[f"i_APB_{i:1d}_PADDR"]   = Constant(0)  # w=22
-            params[f"i_APB_{i:1d}_PENABLE"] = Constant(0)
-            params[f"i_APB_{i:1d}_PSEL"]    = Constant(0)
-            params[f"i_APB_{i:1d}_PWRITE"]  = Constant(0)
+            self.hbm_params[f"i_APB_{i:1d}_PWDATA"]  = 0
+            self.hbm_params[f"i_APB_{i:1d}_PADDR"]   = 0
+            self.hbm_params[f"i_APB_{i:1d}_PENABLE"] = 0
+            self.hbm_params[f"i_APB_{i:1d}_PSEL"]    = 0
+            self.hbm_params[f"i_APB_{i:1d}_PWRITE"]  = 0
 
-            params[f"o_APB_{i:1d}_PRDATA"]  = Signal(32)
-            params[f"o_APB_{i:1d}_PREADY"]  = Signal()
-            params[f"o_APB_{i:1d}_PSLVERR"] = Signal()
+            self.hbm_params[f"o_APB_{i:1d}_PRDATA"]  = Open()
+            self.hbm_params[f"o_APB_{i:1d}_PREADY"]  = Open()
+            self.hbm_params[f"o_APB_{i:1d}_PSLVERR"] = Open()
 
-            params[f"o_apb_complete_{i:1d}"] = apb_complete = Signal()
-            self.apb_complete.append(apb_complete)
+            self.hbm_params[f"o_apb_complete_{i:1d}"] = apb_complete[i]
+        self.comb += self.init_done.status.eq(apb_complete == 0b11)
 
         # Temperature ------------------------------------------------------------------------------
         for i in range(2):
-            params[f"o_DRAM_{i:1d}_STAT_CATTRIP"] = stat_cattrip = Signal()
-            params[f"o_DRAM_{i:1d}_STAT_TEMP"]    = stat_temp    = Signal()
-            self.dram_stat_cattrip.append(stat_cattrip)
-            self.dram_stat_temp.append(stat_temp)
-
-        self.comb += self.init_done.status.eq(self.apb_complete[0] & self.apb_complete[1])
+            self.hbm_params[f"o_DRAM_{i:1d}_STAT_CATTRIP"] = Open()
+            self.hbm_params[f"o_DRAM_{i:1d}_STAT_TEMP"]    = Open()
 
     def add_sources(self, platform):
         this_dir = os.path.dirname(os.path.abspath(os.path.realpath(__file__)))
         platform.add_ip(os.path.join(this_dir, "ip", "hbm", self.hbm_name + ".xci"))
-        # FIXME: in Vivado 2018 it is not possible to disable XSDB so we need a debug core?
-        platform.add_ip(os.path.join(this_dir, "ip", "ila", "ila_0.xci"))
 
     def do_finalize(self):
         self.add_sources(self.platform)
         self.specials += Instance(self.hbm_name, **self.hbm_params)
-        self.specials += Instance("ila_0",  # FIXME: remove
-                                  i_clk=ClockSignal("apb"),
-                                  i_probe0=self.axi[0].ar.valid,
-                                  )
