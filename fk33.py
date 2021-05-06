@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# This file is Copyright (c) 2020 Florent Kermarrec <florent@enjoy-digital.fr>
+# This file is Copyright (c) 2020-2021 Florent Kermarrec <florent@enjoy-digital.fr>
 # License: BSD
 
 import os
@@ -13,14 +13,16 @@ from litex.build.xilinx import XilinxPlatform, VivadoProgrammer
 
 from litex.soc.cores.clock import *
 from litex.soc.integration.soc_core import *
+from litex.soc.integration.soc import SoCRegion
 from litex.soc.integration.builder import *
 from litex.soc.cores.led import LedChaser
 
-from litepcie.phy.usppciephy import USPHBMPCIEPHY
-from litepcie.core import LitePCIeEndpoint, LitePCIeMSI
-from litepcie.frontend.dma import LitePCIeDMA
-from litepcie.frontend.wishbone import LitePCIeWishboneBridge
-from litepcie.software import generate_litepcie_software
+from hbm_ip import HBMIP
+
+from litedram.common import *
+from litedram.frontend.axi import *
+
+from litescope import LiteScopeAnalyzer
 
 # Use ----------------------------------------------------------------------------------------------
 
@@ -30,13 +32,18 @@ from litepcie.software import generate_litepcie_software
 
 # Create bridge:
 # --------------
-# litex_server --jtag --jtag-config=openocd_xc7_ft2232.cfg
+# litex_server --jtag --jtag-config=openocd_xc7_ft2232.cfg --jtag-chain=2
 
 # Use:
 # ----
 # Dump regs:    litex_cli --regs
 # Use analyzer: litescope_cli
 # Use console:  litex_term bridge
+
+# Verify HBM in the BIOS:
+# mem_list
+# mem_test  0x40000000 0x100000
+# mem_speed 0x40000000 0x100000
 
 # IOs ----------------------------------------------------------------------------------------------
 
@@ -79,24 +86,30 @@ class Platform(XilinxPlatform):
 
 class _CRG(Module):
     def __init__(self, platform, sys_clk_freq):
-        self.clock_domains.cd_sys    = ClockDomain()
+        assert 225e6 <= sys_clk_freq <= 450e6
+        self.clock_domains.cd_sys     = ClockDomain()
+        self.clock_domains.cd_hbm_ref = ClockDomain()
+        self.clock_domains.cd_apb     = ClockDomain()
 
         # # #
 
         self.submodules.pll = pll = USMMCM(speedgrade=-2)
         pll.register_clkin(platform.request("clk200"), 200e6)
-        pll.create_clkout(self.cd_sys, sys_clk_freq)
+        pll.create_clkout(self.cd_sys,     sys_clk_freq)
+        pll.create_clkout(self.cd_hbm_ref, 100e6)
+        pll.create_clkout(self.cd_apb,     100e6)
+        platform.add_false_path_constraints(self.cd_sys.clk, self.cd_apb.clk)
 
 # BaseSoC ------------------------------------------------------------------------------------------
 
 class BaseSoC(SoCCore):
-    def __init__(self, sys_clk_freq=int(125e6), **kwargs):
+    def __init__(self, sys_clk_freq=int(250e6), with_hbm=False, with_analyzer=False, **kwargs):
         platform = Platform()
 
         # SoCCore ----------------------------------------------------------------------------------
         kwargs["uart_name"] = "crossover"
         SoCCore.__init__(self, platform, sys_clk_freq,
-            ident          = "LiteX SoC on Forest Kitten 33",
+            ident          = "LiteX HBM2 Test SoC on Forest Kitten 33.",
             ident_version  = True,
             **kwargs)
 
@@ -104,35 +117,49 @@ class BaseSoC(SoCCore):
         self.submodules.crg = _CRG(platform, sys_clk_freq)
 
         # JTAGBone --------------------------------------------------------------------------------
-        self.add_jtagbone()
+        self.add_jtagbone(chain=2) # Chain 1 already used by HBM2 debug probes.
 
         # Leds -------------------------------------------------------------------------------------
         self.submodules.leds = LedChaser(
             pads         = Cat(*[platform.request("user_led", i) for i in range(7)]),
             sys_clk_freq = sys_clk_freq)
 
+        # HBM --------------------------------------------------------------------------------------
+        if with_hbm:
+            # Add HBM Core.
+            self.submodules.hbm = hbm = ClockDomainsRenamer({"axi": "sys"})(HBMIP(platform))
+
+            # Connect four of the HBM's AXI interfaces to the main bus of the SoC.
+            for i in range(4):
+                axi_hbm      = hbm.axi[i]
+                axi_lite_hbm = AXILiteInterface(data_width=256, address_width=33)
+                self.submodules += AXILite2AXI(axi_lite_hbm, axi_hbm)
+                self.bus.add_slave(f"hbm{i}", axi_lite_hbm, SoCRegion(origin=0x4000_0000 + 0x1000_0000*i, size=0x1000_0000)) # 256MB.
+
         # Analyzer ---------------------------------------------------------------------------------
-        from litescope import LiteScopeAnalyzer
-        analyzer_signals = [
-            self.cpu.reset,
-            self.cpu.periph_buses[0],
-            self.cpu.periph_buses[1],
-        ]
-        self.submodules.analyzer = LiteScopeAnalyzer(analyzer_signals,
-            depth        = 2048,
-            clock_domain = "sys",
-            csr_csv      = "analyzer.csv")
+        if with_analyzer:
+            analyzer_signals = [
+                Signal(2), # Add useful signals.
+                Signal(2), # Add useful signals.
+            ]
+            self.submodules.analyzer = LiteScopeAnalyzer(analyzer_signals,
+                depth        = 2048,
+                clock_domain = "sys",
+                csr_csv      = "analyzer.csv"
+            )
 
 # Build --------------------------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="LiteX HBM2 Test SoC on Forest Kitten 33")
-    parser.add_argument("--build",  action="store_true", help="Build bitstream")
-    parser.add_argument("--load",   action="store_true", help="Load bitstream")
+    parser = argparse.ArgumentParser(description="LiteX HBM2 Test SoC on Forest Kitten 33.")
+    parser.add_argument("--build",         action="store_true", help="Build bitstream.")
+    parser.add_argument("--load",          action="store_true", help="Load bitstream.")
+    parser.add_argument("--with-hbm",      action="store_true", help="Use HBM.")
+    parser.add_argument("--with-analyzer", action="store_true", help="Enable Analyzer.")
     soc_core_args(parser)
     args = parser.parse_args()
 
-    soc = BaseSoC(**soc_core_argdict(args))
+    soc = BaseSoC(with_hbm=args.with_hbm, with_analyzer=args.with_analyzer, **soc_core_argdict(args))
     builder = Builder(soc, output_dir="build/fk33", csr_csv="csr.csv")
     builder.build(run=args.build)
 
