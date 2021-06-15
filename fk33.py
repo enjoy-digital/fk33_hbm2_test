@@ -69,7 +69,7 @@ class Platform(XilinxPlatform):
     default_clk_period = 1e9/200e6
 
     def __init__(self):
-        XilinxPlatform.__init__(self, "xcvu33p-fsvh2104-2L-e-es1", _io, toolchain="vivado")
+        XilinxPlatform.__init__(self, "xcvu33p-fsvh2104-2L-e", _io, toolchain="vivado")
 
     def create_programmer(self):
         return VivadoProgrammer()
@@ -81,6 +81,7 @@ class Platform(XilinxPlatform):
         self.add_platform_command("set_property BITSTREAM.CONFIG.OVERTEMPSHUTDOWN ENABLE [current_design]")
         # Reduce programming time
         self.add_platform_command("set_property BITSTREAM.GENERAL.COMPRESS TRUE [current_design]")
+        self.add_platform_command("connect_debug_port dbg_hub/clk [get_nets apb_clk]")
 
 # CRG ----------------------------------------------------------------------------------------------
 
