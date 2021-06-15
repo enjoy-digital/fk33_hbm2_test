@@ -28,7 +28,7 @@ from litescope import LiteScopeAnalyzer
 
 # Build and load bitstream:
 # -------------------------
-# ./fk33.py  --build --load
+# ./fk33.py  --build --load (Tested with Vivado 2018.2)
 
 # Create bridge:
 # --------------
